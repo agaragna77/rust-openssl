@@ -72,8 +72,6 @@ use crate::error::ErrorStack;
 use crate::lib_ctx::LibCtxRef;
 use crate::md::MdRef;
 use crate::nid::Nid;
-#[cfg(ossl340)]
-use crate::ossl_param::OsslParamArray;
 use crate::pkey::{HasPrivate, HasPublic, Id, PKey, PKeyRef, Params, Private};
 use crate::rsa::Padding;
 use crate::sign::RsaPssSaltlen;
