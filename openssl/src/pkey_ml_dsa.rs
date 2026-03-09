@@ -7,12 +7,18 @@
 //! [FIPS 204]: https://csrc.nist.gov/pubs/fips/204/final
 
 use crate::error::ErrorStack;
-use crate::ossl_param::{OsslParamArray, OsslParamBuilder};
 use crate::pkey::{HasPublic, PKey, Private, Public};
-use crate::pkey_ctx::PkeyCtx;
-use foreign_types::ForeignType;
 use std::ffi::CStr;
 use std::marker::PhantomData;
+
+#[cfg(ossl350)]
+use crate::ossl_param::{OsslParamArray, OsslParamBuilder};
+#[cfg(ossl350)]
+use crate::pkey_ctx::PkeyCtx;
+#[cfg(ossl350)]
+use foreign_types::ForeignType;
+#[cfg(boringssl)]
+use foreign_types::ForeignType;
 
 // Safety: these all have null terminators.
 // We can remove these CStr::from_bytes_with_nul_unchecked calls
@@ -56,11 +62,13 @@ impl Variant {
     }
 }
 
+#[cfg(ossl350)]
 pub struct PKeyMlDsaParams<T> {
     params: OsslParamArray,
     _m: PhantomData<T>,
 }
 
+#[cfg(ossl350)]
 impl<T> PKeyMlDsaParams<T> {
     /// Creates a new `PKeyMlDsaParams` from OSSL_PARAM. Internal.
     pub(crate) unsafe fn from_params_ptr(params: *mut ffi::OSSL_PARAM) -> Self {
@@ -73,6 +81,7 @@ impl<T> PKeyMlDsaParams<T> {
     }
 }
 
+#[cfg(ossl350)]
 impl PKeyMlDsaParams<Public> {
     /// Returns a reference to the public key.
     pub fn public_key(&self) -> Result<&[u8], ErrorStack> {
@@ -80,6 +89,7 @@ impl PKeyMlDsaParams<Public> {
     }
 }
 
+#[cfg(ossl350)]
 impl PKeyMlDsaParams<Private> {
     /// Returns the private key seed.
     pub fn private_key_seed(&self) -> Result<&[u8], ErrorStack> {
@@ -89,6 +99,75 @@ impl PKeyMlDsaParams<Private> {
     /// Returns the private key.
     pub fn private_key(&self) -> Result<&[u8], ErrorStack> {
         self.params.locate_octet_string(OSSL_PKEY_PARAM_PRIV_KEY)
+    }
+}
+
+/// BoringSSL: params built from raw key bytes (MLDSA44 only).
+#[cfg(boringssl)]
+pub struct PKeyMlDsaParams<T> {
+    seed: Option<Vec<u8>>,
+    pub_key: Vec<u8>,
+    _m: PhantomData<T>,
+}
+
+#[cfg(boringssl)]
+impl PKeyMlDsaParams<Public> {
+    pub(crate) fn from_pub_key(pub_key: Vec<u8>) -> Self {
+        PKeyMlDsaParams {
+            seed: None,
+            pub_key,
+            _m: PhantomData,
+        }
+    }
+
+    /// Returns a reference to the public key.
+    pub fn public_key(&self) -> Result<&[u8], ErrorStack> {
+        Ok(&self.pub_key)
+    }
+}
+
+/// Trait to build `PKeyMlDsaParams<T>` from raw bytes (BoringSSL); used by generic `ml_dsa`.
+#[cfg(boringssl)]
+pub(crate) trait FromRawMlDsaParams {
+    fn from_raw(seed: Option<Vec<u8>>, pub_key: Vec<u8>) -> Self;
+}
+
+/// Blanket impl so `PKeyMlDsaParams<impl HasPublic>` is satisfied when key-parsing calls `.ml_dsa()`.
+/// When `seed.is_some()` we were called from a private key (T = Private); when `seed.is_none()`, T = Public.
+#[cfg(boringssl)]
+impl<T: HasPublic> FromRawMlDsaParams for PKeyMlDsaParams<T> {
+    fn from_raw(seed: Option<Vec<u8>>, pub_key: Vec<u8>) -> Self {
+        match seed {
+            Some(s) => {
+                let p = PKeyMlDsaParams::<Private>::from_seed_and_pub(s, pub_key);
+                unsafe { std::mem::transmute(p) }
+            }
+            None => {
+                let p = PKeyMlDsaParams::<Public>::from_pub_key(pub_key);
+                unsafe { std::mem::transmute(p) }
+            }
+        }
+    }
+}
+
+#[cfg(boringssl)]
+impl PKeyMlDsaParams<Private> {
+    pub(crate) fn from_seed_and_pub(seed: Vec<u8>, pub_key: Vec<u8>) -> Self {
+        PKeyMlDsaParams {
+            seed: Some(seed),
+            pub_key,
+            _m: PhantomData,
+        }
+    }
+
+    /// Returns the private key seed.
+    pub fn private_key_seed(&self) -> Result<&[u8], ErrorStack> {
+        self.seed.as_deref().ok_or_else(ErrorStack::get)
+    }
+
+    /// Returns the private key (seed for BoringSSL ML-DSA-44).
+    pub fn private_key(&self) -> Result<&[u8], ErrorStack> {
+        self.private_key_seed()
     }
 }
 
@@ -209,6 +288,240 @@ pub fn verify_with_context(
     ctx.verify_message_init_with_params(&mut algo, params.to_param()?)?;
     ctx.verify(message, signature)
 }
+
+// --- BoringSSL implementation (MLDSA44 only) ---
+
+#[cfg(boringssl)]
+fn unsupported_variant_error(_variant: Variant) -> ErrorStack {
+    // Return current error stack so the operation fails; message may be generic.
+    ErrorStack::get()
+}
+
+/// Generates a new ML-DSA key (BoringSSL: MLDSA44 only).
+#[cfg(boringssl)]
+pub fn generate_key(variant: Variant) -> Result<PKey<Private>, ErrorStack> {
+    if variant != Variant::MlDsa44 {
+        return Err(unsupported_variant_error(variant));
+    }
+    const MLDSA_SEED_BYTES: usize = 32;
+    const MLDSA44_PUBLIC_KEY_BYTES: usize = 1312;
+    let mut out_pub = [0u8; MLDSA44_PUBLIC_KEY_BYTES];
+    let mut out_seed = [0u8; MLDSA_SEED_BYTES];
+    #[repr(C)]
+    struct Mldsa44PrivateKey {
+        opaque: [u8; 16512],
+    }
+    let mut out_priv = Mldsa44PrivateKey {
+        opaque: [0u8; 16512],
+    };
+    unsafe {
+        if ffi::MLDSA44_generate_key(
+            out_pub.as_mut_ptr(),
+            out_seed.as_mut_ptr(),
+            &mut out_priv as *mut _ as *mut ffi::MLDSA44_private_key,
+        ) != 1
+        {
+            return Err(ErrorStack::get());
+        }
+        // BoringSSL uses the seed API; EVP_PKEY_new_raw_private_key does not support ML-DSA.
+        let pkey = crate::cvt_p(ffi::EVP_PKEY_from_private_seed(
+            ffi::EVP_pkey_ml_dsa_44(),
+            out_seed.as_ptr(),
+            MLDSA_SEED_BYTES,
+        ))?;
+        Ok(PKey::from_ptr(pkey))
+    }
+}
+
+/// Returns the Private ML-DSA PKey from the provided seed (BoringSSL: MLDSA44 only).
+#[cfg(boringssl)]
+pub fn new_from_seed(variant: Variant, seed: &[u8]) -> Result<PKey<Private>, ErrorStack> {
+    if variant != Variant::MlDsa44 {
+        return Err(unsupported_variant_error(variant));
+    }
+    const MLDSA_SEED_BYTES: usize = 32;
+    if seed.len() != MLDSA_SEED_BYTES {
+        return Err(ErrorStack::get());
+    }
+    unsafe {
+        ffi::init();
+        // BoringSSL uses the seed API; EVP_PKEY_new_raw_private_key does not support ML-DSA.
+        let pkey = crate::cvt_p(ffi::EVP_PKEY_from_private_seed(
+            ffi::EVP_pkey_ml_dsa_44(),
+            seed.as_ptr(),
+            seed.len(),
+        ))?;
+        Ok(PKey::from_ptr(pkey))
+    }
+}
+
+/// Returns the private key seed for an ML-DSA key. On BoringSSL this uses
+/// EVP_PKEY_get_private_seed; on OpenSSL the caller should use key export (e.g. DER) instead.
+#[cfg(boringssl)]
+pub fn private_seed_bytes(key: &PKey<Private>, variant: Variant) -> Result<Vec<u8>, ErrorStack> {
+    if variant != Variant::MlDsa44 {
+        return Err(unsupported_variant_error(variant));
+    }
+    const MLDSA_SEED_BYTES: usize = 32;
+    let mut seed_len: libc::size_t = 0;
+    unsafe {
+        ffi::init();
+        crate::cvt(ffi::EVP_PKEY_get_private_seed(
+            key.as_ptr(),
+            ptr::null_mut(),
+            &mut seed_len,
+        ))?;
+    }
+    let mut seed = vec![0u8; seed_len];
+    unsafe {
+        crate::cvt(ffi::EVP_PKEY_get_private_seed(
+            key.as_ptr(),
+            seed.as_mut_ptr(),
+            &mut seed_len,
+        ))?;
+    }
+    seed.truncate(seed_len);
+    Ok(seed)
+}
+
+/// Signs a message with ML-DSA using a context string (BoringSSL: MLDSA44 only).
+#[cfg(boringssl)]
+pub fn sign_with_context(
+    key: &PKey<Private>,
+    variant: Variant,
+    message: &[u8],
+    context: &[u8],
+) -> Result<Vec<u8>, ErrorStack> {
+    if variant != Variant::MlDsa44 {
+        return Err(unsupported_variant_error(variant));
+    }
+    const MLDSA44_SIGNATURE_BYTES: usize = 2420;
+    let mut seed_len: libc::size_t = 0;
+    unsafe {
+        ffi::init();
+        // BoringSSL ML-DSA keys use the seed representation; use get_private_seed.
+        crate::cvt(ffi::EVP_PKEY_get_private_seed(
+            key.as_ptr(),
+            ptr::null_mut(),
+            &mut seed_len,
+        ))?;
+    }
+    let mut seed = vec![0u8; seed_len];
+    unsafe {
+        crate::cvt(ffi::EVP_PKEY_get_private_seed(
+            key.as_ptr(),
+            seed.as_mut_ptr(),
+            &mut seed_len,
+        ))?;
+    }
+    seed.truncate(seed_len);
+
+    // BoringSSL MLDSA44_private_key_from_seed + MLDSA44_sign
+    #[repr(C)]
+    struct Mldsa44PrivateKey {
+        opaque: [u8; 16512], // sizeof(MLDSA44_private_key) from BoringSSL
+    }
+    let mut priv_key = Mldsa44PrivateKey {
+        opaque: [0u8; 16512],
+    };
+    unsafe {
+        if ffi::MLDSA44_private_key_from_seed(
+            &mut priv_key as *mut _ as *mut ffi::MLDSA44_private_key,
+            seed.as_ptr(),
+            seed.len(),
+        ) != 1
+        {
+            return Err(ErrorStack::get());
+        }
+        let mut out_sig = [0u8; MLDSA44_SIGNATURE_BYTES];
+        let ctx_ptr = context.as_ptr();
+        let ctx_len = context.len();
+        if ffi::MLDSA44_sign(
+            out_sig.as_mut_ptr(),
+            &priv_key as *const _ as *const ffi::MLDSA44_private_key,
+            message.as_ptr(),
+            message.len(),
+            ctx_ptr,
+            ctx_len,
+        ) != 1
+        {
+            return Err(ErrorStack::get());
+        }
+        Ok(out_sig.to_vec())
+    }
+}
+
+/// Verifies a message signature with ML-DSA using a context string (BoringSSL: MLDSA44 only).
+#[cfg(boringssl)]
+pub fn verify_with_context(
+    key: &PKey<impl HasPublic>,
+    variant: Variant,
+    message: &[u8],
+    signature: &[u8],
+    context: &[u8],
+) -> Result<bool, ErrorStack> {
+    if variant != Variant::MlDsa44 {
+        return Err(unsupported_variant_error(variant));
+    }
+    let mut pub_key_bytes_len: libc::size_t = 0;
+    unsafe {
+        ffi::init();
+        crate::cvt(ffi::EVP_PKEY_get_raw_public_key(
+            key.as_ptr(),
+            ptr::null_mut(),
+            &mut pub_key_bytes_len,
+        ))?;
+    }
+    let mut pub_key_bytes = vec![0u8; pub_key_bytes_len];
+    unsafe {
+        crate::cvt(ffi::EVP_PKEY_get_raw_public_key(
+            key.as_ptr(),
+            pub_key_bytes.as_mut_ptr(),
+            &mut pub_key_bytes_len,
+        ))?;
+    }
+    pub_key_bytes.truncate(pub_key_bytes_len);
+
+    #[repr(C)]
+    struct Mldsa44PublicKey {
+        opaque: [u8; 4192], // sizeof(MLDSA44_public_key)
+    }
+    // BoringSSL CBS layout (in case bindings don't export it)
+    #[repr(C)]
+    struct Cbs {
+        data: *const u8,
+        len: libc::size_t,
+    }
+    let mut pub_key = Mldsa44PublicKey {
+        opaque: [0u8; 4192],
+    };
+    unsafe {
+        let mut cbs = Cbs {
+            data: pub_key_bytes.as_ptr(),
+            len: pub_key_bytes.len(),
+        };
+        if ffi::MLDSA44_parse_public_key(
+            &mut pub_key as *mut _ as *mut ffi::MLDSA44_public_key,
+            &mut cbs as *mut Cbs as *mut ffi::cbs_st,
+        ) != 1
+        {
+            return Err(ErrorStack::get());
+        }
+        let r = ffi::MLDSA44_verify(
+            &pub_key as *const _ as *const ffi::MLDSA44_public_key,
+            signature.as_ptr(),
+            signature.len(),
+            message.as_ptr(),
+            message.len(),
+            context.as_ptr(),
+            context.len(),
+        );
+        Ok(r == 1)
+    }
+}
+
+#[cfg(boringssl)]
+use std::ptr;
 
 #[cfg(test)]
 mod tests {

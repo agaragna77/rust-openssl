@@ -49,8 +49,10 @@ use crate::ec::EcKey;
 use crate::error::ErrorStack;
 #[cfg(any(ossl110, boringssl, libressl370, awslc))]
 use crate::pkey_ctx::PkeyCtx;
-#[cfg(ossl350)]
+#[cfg(any(ossl350, boringssl))]
 use crate::pkey_ml_dsa::{self, PKeyMlDsaParams};
+#[cfg(boringssl)]
+use crate::pkey_ml_dsa::FromRawMlDsaParams;
 #[cfg(ossl350)]
 use crate::pkey_ml_kem::{self, PKeyMlKemParams};
 use crate::rsa::Rsa;
@@ -218,6 +220,70 @@ impl<T> PKeyRef<T> {
             ))?;
             Ok(Some(PKeyMlDsaParams::<T>::from_params_ptr(params)))
         }
+    }
+
+    /// Returns the inner `PKeyMlDsaParams` (BoringSSL: MLDSA44 only). Available for generic `PKeyRef<impl HasPublic>`.
+    #[cfg(boringssl)]
+    pub fn ml_dsa(
+        &self,
+        variant: pkey_ml_dsa::Variant,
+    ) -> Result<Option<PKeyMlDsaParams<T>>, ErrorStack>
+    where
+        PKeyMlDsaParams<T>: pkey_ml_dsa::FromRawMlDsaParams,
+    {
+        if variant != pkey_ml_dsa::Variant::MlDsa44 {
+            return Ok(None);
+        }
+        if self.id().as_raw() != ffi::EVP_PKEY_ML_DSA_44 {
+            return Ok(None);
+        }
+        let mut pub_len: libc::size_t = 0;
+        unsafe {
+            cvt(ffi::EVP_PKEY_get_raw_public_key(
+                self.as_ptr(),
+                ptr::null_mut(),
+                &mut pub_len,
+            ))?;
+        }
+        let mut pub_key = vec![0u8; pub_len];
+        unsafe {
+            cvt(ffi::EVP_PKEY_get_raw_public_key(
+                self.as_ptr(),
+                pub_key.as_mut_ptr(),
+                &mut pub_len,
+            ))?;
+        }
+        pub_key.truncate(pub_len);
+        // BoringSSL ML-DSA uses the seed API, not get_raw_private_key.
+        let seed_opt = {
+            let mut seed_len: libc::size_t = 0;
+            let r = unsafe {
+                ffi::EVP_PKEY_get_private_seed(
+                    self.as_ptr(),
+                    ptr::null_mut(),
+                    &mut seed_len,
+                )
+            };
+            if r != 1 {
+                None
+            } else {
+                let mut seed = vec![0u8; seed_len];
+                let r2 = unsafe {
+                    ffi::EVP_PKEY_get_private_seed(
+                        self.as_ptr(),
+                        seed.as_mut_ptr(),
+                        &mut seed_len,
+                    )
+                };
+                if r2 != 1 {
+                    None
+                } else {
+                    seed.truncate(seed_len);
+                    Some(seed)
+                }
+            }
+        };
+        Ok(Some(PKeyMlDsaParams::<T>::from_raw(seed_opt, pub_key)))
     }
 
     /// Returns the inner `PKeyMlKemParams`. Returns Ok(None) if either the variant is incorrect or the key is not of type ML-DSA.
@@ -728,10 +794,15 @@ impl PKey<Private> {
 
     /// Generates a new ML-DSA key with the provided variant.
     ///
-    /// Requires OpenSSL 3.5.0 or newer.
+    /// Requires OpenSSL 3.5.0 or newer; on BoringSSL only ML-DSA-44 is supported.
     #[cfg(ossl350)]
     pub fn generate_ml_dsa(variant: pkey_ml_dsa::Variant) -> Result<PKey<Private>, ErrorStack> {
         Self::generate_key_from_name(variant.as_str())
+    }
+
+    #[cfg(boringssl)]
+    pub fn generate_ml_dsa(variant: pkey_ml_dsa::Variant) -> Result<PKey<Private>, ErrorStack> {
+        pkey_ml_dsa::generate_key(variant)
     }
 
     /// Generates a new ML-DSA key with the provided variant.
@@ -885,7 +956,7 @@ impl PKey<Private> {
     }
 
     /// Creates a private key from seed representation using a string keytype
-    #[cfg(ossl350)]
+    #[cfg(any(ossl350, boringssl))]
     pub fn private_key_from_seed(
         key_type: pkey_ml_dsa::Variant,
         bytes: &[u8],
@@ -960,6 +1031,27 @@ impl PKey<Public> {
                 ptr::null_mut(),
                 c_key_type.as_ptr(),
                 ptr::null(),
+                bytes.as_ptr(),
+                bytes.len(),
+            ))
+            .map(|p| PKey::from_ptr(p))
+        }
+    }
+
+    /// Creates a public key from raw bytes (BoringSSL: ML-DSA-44 only).
+    #[cfg(boringssl)]
+    pub fn public_key_from_raw_bytes_ex(
+        bytes: &[u8],
+        key_type: &str,
+    ) -> Result<PKey<Public>, ErrorStack> {
+        if key_type != "ML-DSA-44" {
+            return Err(ErrorStack::get());
+        }
+        unsafe {
+            ffi::init();
+            // BoringSSL uses the alg-based API; EVP_PKEY_new_raw_public_key does not support ML-DSA.
+            cvt_p(ffi::EVP_PKEY_from_raw_public_key(
+                ffi::EVP_pkey_ml_dsa_44(),
                 bytes.as_ptr(),
                 bytes.len(),
             ))

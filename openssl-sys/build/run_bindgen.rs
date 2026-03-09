@@ -74,6 +74,11 @@ const INCLUDES: &str = "
 #endif
 
 #if defined(OPENSSL_IS_BORINGSSL)
+#include <openssl/bytestring.h>
+#include <openssl/mldsa.h>
+#endif
+
+#if defined(OPENSSL_IS_BORINGSSL)
 #include <openssl/mlkem.h>
 #endif
 
