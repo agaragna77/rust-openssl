@@ -222,7 +222,7 @@ impl<T> PKeyRef<T> {
         }
     }
 
-    /// Returns the inner `PKeyMlDsaParams` (BoringSSL: MLDSA44 only). Available for generic `PKeyRef<impl HasPublic>`.
+    /// Returns the inner `PKeyMlDsaParams` (BoringSSL: MLDSA44, MLDSA65, MLDSA87). Available for generic `PKeyRef<impl HasPublic>`.
     #[cfg(boringssl)]
     pub fn ml_dsa(
         &self,
@@ -231,10 +231,12 @@ impl<T> PKeyRef<T> {
     where
         PKeyMlDsaParams<T>: pkey_ml_dsa::FromRawMlDsaParams,
     {
-        if variant != pkey_ml_dsa::Variant::MlDsa44 {
-            return Ok(None);
-        }
-        if self.id().as_raw() != ffi::EVP_PKEY_ML_DSA_44 {
+        let expected_id = match variant {
+            pkey_ml_dsa::Variant::MlDsa44 => ffi::EVP_PKEY_ML_DSA_44,
+            pkey_ml_dsa::Variant::MlDsa65 => ffi::EVP_PKEY_ML_DSA_65,
+            pkey_ml_dsa::Variant::MlDsa87 => ffi::EVP_PKEY_ML_DSA_87,
+        };
+        if self.id().as_raw() != expected_id {
             return Ok(None);
         }
         let mut pub_len: libc::size_t = 0;
@@ -1038,20 +1040,24 @@ impl PKey<Public> {
         }
     }
 
-    /// Creates a public key from raw bytes (BoringSSL: ML-DSA-44 only).
+    /// Creates a public key from raw bytes (BoringSSL: ML-DSA-44, ML-DSA-65, ML-DSA-87).
     #[cfg(boringssl)]
     pub fn public_key_from_raw_bytes_ex(
         bytes: &[u8],
         key_type: &str,
     ) -> Result<PKey<Public>, ErrorStack> {
-        if key_type != "ML-DSA-44" {
-            return Err(ErrorStack::get());
-        }
+        let alg = unsafe {
+            match key_type {
+                "ML-DSA-44" => ffi::EVP_pkey_ml_dsa_44(),
+                "ML-DSA-65" => ffi::EVP_pkey_ml_dsa_65(),
+                "ML-DSA-87" => ffi::EVP_pkey_ml_dsa_87(),
+                _ => return Err(ErrorStack::get()),
+            }
+        };
         unsafe {
             ffi::init();
-            // BoringSSL uses the alg-based API; EVP_PKEY_new_raw_public_key does not support ML-DSA.
             cvt_p(ffi::EVP_PKEY_from_raw_public_key(
-                ffi::EVP_pkey_ml_dsa_44(),
+                alg,
                 bytes.as_ptr(),
                 bytes.len(),
             ))

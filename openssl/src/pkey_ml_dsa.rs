@@ -289,65 +289,117 @@ pub fn verify_with_context(
     ctx.verify(message, signature)
 }
 
-// --- BoringSSL implementation (MLDSA44 only) ---
+// --- BoringSSL implementation (MLDSA44 and MLDSA65) ---
 
 #[cfg(boringssl)]
 fn unsupported_variant_error(_variant: Variant) -> ErrorStack {
-    // Return current error stack so the operation fails; message may be generic.
     ErrorStack::get()
 }
 
-/// Generates a new ML-DSA key (BoringSSL: MLDSA44 only).
+/// Generates a new ML-DSA key (BoringSSL: MLDSA44, MLDSA65, MLDSA87).
 #[cfg(boringssl)]
 pub fn generate_key(variant: Variant) -> Result<PKey<Private>, ErrorStack> {
-    if variant != Variant::MlDsa44 {
-        return Err(unsupported_variant_error(variant));
-    }
     const MLDSA_SEED_BYTES: usize = 32;
-    const MLDSA44_PUBLIC_KEY_BYTES: usize = 1312;
-    let mut out_pub = [0u8; MLDSA44_PUBLIC_KEY_BYTES];
-    let mut out_seed = [0u8; MLDSA_SEED_BYTES];
-    #[repr(C)]
-    struct Mldsa44PrivateKey {
-        opaque: [u8; 16512],
-    }
-    let mut out_priv = Mldsa44PrivateKey {
-        opaque: [0u8; 16512],
-    };
-    unsafe {
-        if ffi::MLDSA44_generate_key(
-            out_pub.as_mut_ptr(),
-            out_seed.as_mut_ptr(),
-            &mut out_priv as *mut _ as *mut ffi::MLDSA44_private_key,
-        ) != 1
-        {
-            return Err(ErrorStack::get());
+    match variant {
+        Variant::MlDsa44 => {
+            const MLDSA44_PUBLIC_KEY_BYTES: usize = 1312;
+            let mut out_pub = [0u8; MLDSA44_PUBLIC_KEY_BYTES];
+            let mut out_seed = [0u8; MLDSA_SEED_BYTES];
+            #[repr(C)]
+            struct Mldsa44PrivateKey {
+                opaque: [u8; 16512],
+            }
+            let mut out_priv = Mldsa44PrivateKey {
+                opaque: [0u8; 16512],
+            };
+            unsafe {
+                if ffi::MLDSA44_generate_key(
+                    out_pub.as_mut_ptr(),
+                    out_seed.as_mut_ptr(),
+                    &mut out_priv as *mut _ as *mut ffi::MLDSA44_private_key,
+                ) != 1
+                {
+                    return Err(ErrorStack::get());
+                }
+                let pkey = crate::cvt_p(ffi::EVP_PKEY_from_private_seed(
+                    ffi::EVP_pkey_ml_dsa_44(),
+                    out_seed.as_ptr(),
+                    MLDSA_SEED_BYTES,
+                ))?;
+                Ok(PKey::from_ptr(pkey))
+            }
         }
-        // BoringSSL uses the seed API; EVP_PKEY_new_raw_private_key does not support ML-DSA.
-        let pkey = crate::cvt_p(ffi::EVP_PKEY_from_private_seed(
-            ffi::EVP_pkey_ml_dsa_44(),
-            out_seed.as_ptr(),
-            MLDSA_SEED_BYTES,
-        ))?;
-        Ok(PKey::from_ptr(pkey))
+        Variant::MlDsa65 => {
+            const MLDSA65_PUBLIC_KEY_BYTES: usize = 1952;
+            let mut out_pub = [0u8; MLDSA65_PUBLIC_KEY_BYTES];
+            let mut out_seed = [0u8; MLDSA_SEED_BYTES];
+            #[repr(C)]
+            struct Mldsa65PrivateKey {
+                opaque: [u8; 23680], // sizeof(MLDSA65_private_key) from BoringSSL
+            }
+            let mut out_priv = Mldsa65PrivateKey {
+                opaque: [0u8; 23680],
+            };
+            unsafe {
+                if ffi::MLDSA65_generate_key(
+                    out_pub.as_mut_ptr(),
+                    out_seed.as_mut_ptr(),
+                    &mut out_priv as *mut _ as *mut ffi::MLDSA65_private_key,
+                ) != 1
+                {
+                    return Err(ErrorStack::get());
+                }
+                let pkey = crate::cvt_p(ffi::EVP_PKEY_from_private_seed(
+                    ffi::EVP_pkey_ml_dsa_65(),
+                    out_seed.as_ptr(),
+                    MLDSA_SEED_BYTES,
+                ))?;
+                Ok(PKey::from_ptr(pkey))
+            }
+        }
+        Variant::MlDsa87 => {
+            const MLDSA87_PUBLIC_KEY_BYTES: usize = 2592;
+            let mut out_pub = [0u8; MLDSA87_PUBLIC_KEY_BYTES];
+            let mut out_seed = [0u8; MLDSA_SEED_BYTES];
+            // Use exact size from FFI type; heap-allocate to avoid stack overflow.
+            let out_priv_size = std::mem::size_of::<ffi::MLDSA87_private_key>();
+            let mut out_priv = vec![0u8; out_priv_size];
+            unsafe {
+                if ffi::MLDSA87_generate_key(
+                    out_pub.as_mut_ptr(),
+                    out_seed.as_mut_ptr(),
+                    out_priv.as_mut_ptr() as *mut ffi::MLDSA87_private_key,
+                ) != 1
+                {
+                    return Err(ErrorStack::get());
+                }
+                let pkey = crate::cvt_p(ffi::EVP_PKEY_from_private_seed(
+                    ffi::EVP_pkey_ml_dsa_87(),
+                    out_seed.as_ptr(),
+                    MLDSA_SEED_BYTES,
+                ))?;
+                Ok(PKey::from_ptr(pkey))
+            }
+        }
     }
 }
 
-/// Returns the Private ML-DSA PKey from the provided seed (BoringSSL: MLDSA44 only).
+/// Returns the Private ML-DSA PKey from the provided seed (BoringSSL: MLDSA44, MLDSA65, MLDSA87).
 #[cfg(boringssl)]
 pub fn new_from_seed(variant: Variant, seed: &[u8]) -> Result<PKey<Private>, ErrorStack> {
-    if variant != Variant::MlDsa44 {
-        return Err(unsupported_variant_error(variant));
-    }
     const MLDSA_SEED_BYTES: usize = 32;
     if seed.len() != MLDSA_SEED_BYTES {
         return Err(ErrorStack::get());
     }
     unsafe {
         ffi::init();
-        // BoringSSL uses the seed API; EVP_PKEY_new_raw_private_key does not support ML-DSA.
+        let alg = match variant {
+            Variant::MlDsa44 => ffi::EVP_pkey_ml_dsa_44(),
+            Variant::MlDsa65 => ffi::EVP_pkey_ml_dsa_65(),
+            Variant::MlDsa87 => ffi::EVP_pkey_ml_dsa_87(),
+        };
         let pkey = crate::cvt_p(ffi::EVP_PKEY_from_private_seed(
-            ffi::EVP_pkey_ml_dsa_44(),
+            alg,
             seed.as_ptr(),
             seed.len(),
         ))?;
@@ -356,13 +408,9 @@ pub fn new_from_seed(variant: Variant, seed: &[u8]) -> Result<PKey<Private>, Err
 }
 
 /// Returns the private key seed for an ML-DSA key. On BoringSSL this uses
-/// EVP_PKEY_get_private_seed; on OpenSSL the caller should use key export (e.g. DER) instead.
+/// EVP_PKEY_get_private_seed (MLDSA44, MLDSA65, MLDSA87).
 #[cfg(boringssl)]
-pub fn private_seed_bytes(key: &PKey<Private>, variant: Variant) -> Result<Vec<u8>, ErrorStack> {
-    if variant != Variant::MlDsa44 {
-        return Err(unsupported_variant_error(variant));
-    }
-    const MLDSA_SEED_BYTES: usize = 32;
+pub fn private_seed_bytes(key: &PKey<Private>, _variant: Variant) -> Result<Vec<u8>, ErrorStack> {
     let mut seed_len: libc::size_t = 0;
     unsafe {
         ffi::init();
@@ -384,7 +432,7 @@ pub fn private_seed_bytes(key: &PKey<Private>, variant: Variant) -> Result<Vec<u
     Ok(seed)
 }
 
-/// Signs a message with ML-DSA using a context string (BoringSSL: MLDSA44 only).
+/// Signs a message with ML-DSA using a context string (BoringSSL: MLDSA44, MLDSA65, MLDSA87).
 #[cfg(boringssl)]
 pub fn sign_with_context(
     key: &PKey<Private>,
@@ -392,14 +440,9 @@ pub fn sign_with_context(
     message: &[u8],
     context: &[u8],
 ) -> Result<Vec<u8>, ErrorStack> {
-    if variant != Variant::MlDsa44 {
-        return Err(unsupported_variant_error(variant));
-    }
-    const MLDSA44_SIGNATURE_BYTES: usize = 2420;
     let mut seed_len: libc::size_t = 0;
     unsafe {
         ffi::init();
-        // BoringSSL ML-DSA keys use the seed representation; use get_private_seed.
         crate::cvt(ffi::EVP_PKEY_get_private_seed(
             key.as_ptr(),
             ptr::null_mut(),
@@ -416,42 +459,105 @@ pub fn sign_with_context(
     }
     seed.truncate(seed_len);
 
-    // BoringSSL MLDSA44_private_key_from_seed + MLDSA44_sign
-    #[repr(C)]
-    struct Mldsa44PrivateKey {
-        opaque: [u8; 16512], // sizeof(MLDSA44_private_key) from BoringSSL
-    }
-    let mut priv_key = Mldsa44PrivateKey {
-        opaque: [0u8; 16512],
-    };
-    unsafe {
-        if ffi::MLDSA44_private_key_from_seed(
-            &mut priv_key as *mut _ as *mut ffi::MLDSA44_private_key,
-            seed.as_ptr(),
-            seed.len(),
-        ) != 1
-        {
-            return Err(ErrorStack::get());
+    match variant {
+        Variant::MlDsa44 => {
+            const MLDSA44_SIGNATURE_BYTES: usize = 2420;
+            #[repr(C)]
+            struct Mldsa44PrivateKey {
+                opaque: [u8; 16512],
+            }
+            let mut priv_key = Mldsa44PrivateKey {
+                opaque: [0u8; 16512],
+            };
+            unsafe {
+                if ffi::MLDSA44_private_key_from_seed(
+                    &mut priv_key as *mut _ as *mut ffi::MLDSA44_private_key,
+                    seed.as_ptr(),
+                    seed.len(),
+                ) != 1
+                {
+                    return Err(ErrorStack::get());
+                }
+                let mut out_sig = [0u8; MLDSA44_SIGNATURE_BYTES];
+                if ffi::MLDSA44_sign(
+                    out_sig.as_mut_ptr(),
+                    &priv_key as *const _ as *const ffi::MLDSA44_private_key,
+                    message.as_ptr(),
+                    message.len(),
+                    context.as_ptr(),
+                    context.len(),
+                ) != 1
+                {
+                    return Err(ErrorStack::get());
+                }
+                Ok(out_sig.to_vec())
+            }
         }
-        let mut out_sig = [0u8; MLDSA44_SIGNATURE_BYTES];
-        let ctx_ptr = context.as_ptr();
-        let ctx_len = context.len();
-        if ffi::MLDSA44_sign(
-            out_sig.as_mut_ptr(),
-            &priv_key as *const _ as *const ffi::MLDSA44_private_key,
-            message.as_ptr(),
-            message.len(),
-            ctx_ptr,
-            ctx_len,
-        ) != 1
-        {
-            return Err(ErrorStack::get());
+        Variant::MlDsa65 => {
+            const MLDSA65_SIGNATURE_BYTES: usize = 3309;
+            #[repr(C)]
+            struct Mldsa65PrivateKey {
+                opaque: [u8; 23680],
+            }
+            let mut priv_key = Mldsa65PrivateKey {
+                opaque: [0u8; 23680],
+            };
+            unsafe {
+                if ffi::MLDSA65_private_key_from_seed(
+                    &mut priv_key as *mut _ as *mut ffi::MLDSA65_private_key,
+                    seed.as_ptr(),
+                    seed.len(),
+                ) != 1
+                {
+                    return Err(ErrorStack::get());
+                }
+                let mut out_sig = [0u8; MLDSA65_SIGNATURE_BYTES];
+                if ffi::MLDSA65_sign(
+                    out_sig.as_mut_ptr(),
+                    &priv_key as *const _ as *const ffi::MLDSA65_private_key,
+                    message.as_ptr(),
+                    message.len(),
+                    context.as_ptr(),
+                    context.len(),
+                ) != 1
+                {
+                    return Err(ErrorStack::get());
+                }
+                Ok(out_sig.to_vec())
+            }
         }
-        Ok(out_sig.to_vec())
+        Variant::MlDsa87 => {
+            const MLDSA87_SIGNATURE_BYTES: usize = 4627;
+            let priv_key_size = std::mem::size_of::<ffi::MLDSA87_private_key>();
+            let mut priv_key = vec![0u8; priv_key_size];
+            unsafe {
+                if ffi::MLDSA87_private_key_from_seed(
+                    priv_key.as_mut_ptr() as *mut ffi::MLDSA87_private_key,
+                    seed.as_ptr(),
+                    seed.len(),
+                ) != 1
+                {
+                    return Err(ErrorStack::get());
+                }
+                let mut out_sig = [0u8; MLDSA87_SIGNATURE_BYTES];
+                if ffi::MLDSA87_sign(
+                    out_sig.as_mut_ptr(),
+                    priv_key.as_ptr() as *const ffi::MLDSA87_private_key,
+                    message.as_ptr(),
+                    message.len(),
+                    context.as_ptr(),
+                    context.len(),
+                ) != 1
+                {
+                    return Err(ErrorStack::get());
+                }
+                Ok(out_sig.to_vec())
+            }
+        }
     }
 }
 
-/// Verifies a message signature with ML-DSA using a context string (BoringSSL: MLDSA44 only).
+/// Verifies a message signature with ML-DSA using a context string (BoringSSL: MLDSA44, MLDSA65, MLDSA87).
 #[cfg(boringssl)]
 pub fn verify_with_context(
     key: &PKey<impl HasPublic>,
@@ -460,9 +566,6 @@ pub fn verify_with_context(
     signature: &[u8],
     context: &[u8],
 ) -> Result<bool, ErrorStack> {
-    if variant != Variant::MlDsa44 {
-        return Err(unsupported_variant_error(variant));
-    }
     let mut pub_key_bytes_len: libc::size_t = 0;
     unsafe {
         ffi::init();
@@ -483,40 +586,103 @@ pub fn verify_with_context(
     pub_key_bytes.truncate(pub_key_bytes_len);
 
     #[repr(C)]
-    struct Mldsa44PublicKey {
-        opaque: [u8; 4192], // sizeof(MLDSA44_public_key)
-    }
-    // BoringSSL CBS layout (in case bindings don't export it)
-    #[repr(C)]
     struct Cbs {
         data: *const u8,
         len: libc::size_t,
     }
-    let mut pub_key = Mldsa44PublicKey {
-        opaque: [0u8; 4192],
-    };
-    unsafe {
-        let mut cbs = Cbs {
-            data: pub_key_bytes.as_ptr(),
-            len: pub_key_bytes.len(),
-        };
-        if ffi::MLDSA44_parse_public_key(
-            &mut pub_key as *mut _ as *mut ffi::MLDSA44_public_key,
-            &mut cbs as *mut Cbs as *mut ffi::cbs_st,
-        ) != 1
-        {
-            return Err(ErrorStack::get());
+
+    match variant {
+        Variant::MlDsa44 => {
+            #[repr(C)]
+            struct Mldsa44PublicKey {
+                opaque: [u8; 4192],
+            }
+            let mut pub_key = Mldsa44PublicKey {
+                opaque: [0u8; 4192],
+            };
+            unsafe {
+                let mut cbs = Cbs {
+                    data: pub_key_bytes.as_ptr(),
+                    len: pub_key_bytes.len(),
+                };
+                if ffi::MLDSA44_parse_public_key(
+                    &mut pub_key as *mut _ as *mut ffi::MLDSA44_public_key,
+                    &mut cbs as *mut Cbs as *mut ffi::cbs_st,
+                ) != 1
+                {
+                    return Err(ErrorStack::get());
+                }
+                let r = ffi::MLDSA44_verify(
+                    &pub_key as *const _ as *const ffi::MLDSA44_public_key,
+                    signature.as_ptr(),
+                    signature.len(),
+                    message.as_ptr(),
+                    message.len(),
+                    context.as_ptr(),
+                    context.len(),
+                );
+                Ok(r == 1)
+            }
         }
-        let r = ffi::MLDSA44_verify(
-            &pub_key as *const _ as *const ffi::MLDSA44_public_key,
-            signature.as_ptr(),
-            signature.len(),
-            message.as_ptr(),
-            message.len(),
-            context.as_ptr(),
-            context.len(),
-        );
-        Ok(r == 1)
+        Variant::MlDsa65 => {
+            #[repr(C)]
+            struct Mldsa65PublicKey {
+                opaque: [u8; 6240], // sizeof(MLDSA65_public_key) from BoringSSL
+            }
+            let mut pub_key = Mldsa65PublicKey {
+                opaque: [0u8; 6240],
+            };
+            unsafe {
+                let mut cbs = Cbs {
+                    data: pub_key_bytes.as_ptr(),
+                    len: pub_key_bytes.len(),
+                };
+                if ffi::MLDSA65_parse_public_key(
+                    &mut pub_key as *mut _ as *mut ffi::MLDSA65_public_key,
+                    &mut cbs as *mut Cbs as *mut ffi::cbs_st,
+                ) != 1
+                {
+                    return Err(ErrorStack::get());
+                }
+                let r = ffi::MLDSA65_verify(
+                    &pub_key as *const _ as *const ffi::MLDSA65_public_key,
+                    signature.as_ptr(),
+                    signature.len(),
+                    message.as_ptr(),
+                    message.len(),
+                    context.as_ptr(),
+                    context.len(),
+                );
+                Ok(r == 1)
+            }
+        }
+        Variant::MlDsa87 => {
+            let pub_key_size = std::mem::size_of::<ffi::MLDSA87_public_key>();
+            let mut pub_key = vec![0u8; pub_key_size];
+            unsafe {
+                let mut cbs = Cbs {
+                    data: pub_key_bytes.as_ptr(),
+                    len: pub_key_bytes.len(),
+                };
+                if ffi::MLDSA87_parse_public_key(
+                    pub_key.as_mut_ptr() as *mut ffi::MLDSA87_public_key,
+                    &mut cbs as *mut Cbs as *mut ffi::cbs_st,
+                ) != 1
+                {
+                    return Err(ErrorStack::get());
+                }
+                let r = ffi::MLDSA87_verify(
+                    pub_key.as_ptr() as *const ffi::MLDSA87_public_key,
+                    signature.as_ptr(),
+                    signature.len(),
+                    message.as_ptr(),
+                    message.len(),
+                    context.as_ptr(),
+                    context.len(),
+                );
+                Ok(r == 1)
+            }
+        }
     }
 }
 
