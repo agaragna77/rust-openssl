@@ -289,6 +289,34 @@ pub fn verify_with_context(
     ctx.verify(message, signature)
 }
 
+/// Returns the private key seed for an ML-DSA key. On OpenSSL 3.5+ this uses
+/// EVP_PKEY_get_octet_string_param with the "seed" parameter (when the seed is retained).
+#[cfg(ossl350)]
+pub fn private_seed_bytes(key: &PKey<Private>, _variant: Variant) -> Result<Vec<u8>, ErrorStack> {
+    let mut seed_len: libc::size_t = 0;
+    unsafe {
+        crate::cvt(ffi::EVP_PKEY_get_octet_string_param(
+            key.as_ptr(),
+            OSSL_PKEY_PARAM_SEED.as_ptr(),
+            std::ptr::null_mut(),
+            0,
+            &mut seed_len,
+        ))?;
+    }
+    let mut seed = vec![0u8; seed_len];
+    unsafe {
+        crate::cvt(ffi::EVP_PKEY_get_octet_string_param(
+            key.as_ptr(),
+            OSSL_PKEY_PARAM_SEED.as_ptr(),
+            seed.as_mut_ptr(),
+            seed.len(),
+            &mut seed_len,
+        ))?;
+    }
+    seed.truncate(seed_len);
+    Ok(seed)
+}
+
 // --- BoringSSL implementation (MLDSA44 and MLDSA65) ---
 
 #[cfg(boringssl)]
