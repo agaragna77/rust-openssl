@@ -8,6 +8,8 @@
 //!
 //! [FIPS 203]: https://csrc.nist.gov/pubs/fips/203/final
 
+#[cfg(boringssl)]
+use crate::cvt;
 use crate::error::ErrorStack;
 #[cfg(ossl350)]
 use crate::ossl_param::OsslParamArray;
@@ -16,8 +18,6 @@ use foreign_types::ForeignType;
 #[cfg(ossl350)]
 use std::ffi::CStr;
 use std::marker::PhantomData;
-#[cfg(boringssl)]
-use crate::cvt;
 
 // Re-export type markers
 #[cfg(ossl350)]
@@ -237,9 +237,7 @@ impl PKeyMlKemParams<Private> {
                     ffi::mlkem::MLKEM768_public_from_private(&mut pub_key, &priv_key);
 
                     // Marshal public key to bytes
-                    let mut cbb = ffi::mlkem::CBB {
-                        _opaque: [0u8; 48],
-                    };
+                    let mut cbb = ffi::mlkem::CBB { _opaque: [0u8; 48] };
                     cvt(ffi::mlkem::CBB_init(&mut cbb, variant.public_key_bytes()))?;
                     cvt(ffi::mlkem::MLKEM768_marshal_public_key(&mut cbb, &pub_key))?;
 
@@ -265,9 +263,7 @@ impl PKeyMlKemParams<Private> {
                     ffi::mlkem::MLKEM1024_public_from_private(&mut pub_key, &priv_key);
 
                     // Marshal public key to bytes
-                    let mut cbb = ffi::mlkem::CBB {
-                        _opaque: [0u8; 48],
-                    };
+                    let mut cbb = ffi::mlkem::CBB { _opaque: [0u8; 48] };
                     cvt(ffi::mlkem::CBB_init(&mut cbb, variant.public_key_bytes()))?;
                     cvt(ffi::mlkem::MLKEM1024_marshal_public_key(&mut cbb, &pub_key))?;
 
@@ -495,7 +491,6 @@ mod tests {
     }
 }
 
-
 #[cfg(all(test, boringssl))]
 mod tests_boringssl {
     use super::*;
@@ -584,7 +579,10 @@ mod tests_boringssl {
         // For now we can't test full encap/decap because we need public key operations
         // which aren't fully implemented yet for BoringSSL.
         // But we can verify the key was generated successfully.
-        assert_eq!(params.public_key().unwrap().len(), variant.public_key_bytes());
+        assert_eq!(
+            params.public_key().unwrap().len(),
+            variant.public_key_bytes()
+        );
 
         // TODO: Once we implement encapsulate() on public keys, add full test:
         // 1. Generate key pair
