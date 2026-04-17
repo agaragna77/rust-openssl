@@ -51,6 +51,8 @@ use crate::error::ErrorStack;
 use crate::lib_ctx::LibCtxRef;
 #[cfg(any(ossl110, boringssl, libressl370, awslc))]
 use crate::pkey_ctx::PkeyCtx;
+#[cfg(ossl350)]
+use crate::pkey_ml_dsa::{self, PKeyMlDsaParams};
 use crate::rsa::Rsa;
 use crate::symm::Cipher;
 use crate::util::{invoke_passwd_cb, CallbackState};
@@ -248,6 +250,27 @@ impl<T> PKeyRef<T> {
         }
     }
 
+    /// Returns the inner `PKeyMlDsaParams`. Returns Ok(None) if either the variant is incorrect or the key is not of type ML-DSA.
+    #[corresponds(EVP_PKEY_todata)]
+    #[cfg(ossl350)]
+    pub fn ml_dsa(
+        &self,
+        variant: pkey_ml_dsa::Variant,
+    ) -> Result<Option<PKeyMlDsaParams<T>>, ErrorStack> {
+        if !self.is_key_type(variant.as_str())? {
+            return Ok(None);
+        }
+        unsafe {
+            let mut params: *mut ffi::OSSL_PARAM = ptr::null_mut();
+            cvt(ffi::EVP_PKEY_todata(
+                self.as_ptr(),
+                ffi::EVP_PKEY_KEYPAIR,
+                &mut params,
+            ))?;
+            Ok(Some(PKeyMlDsaParams::<T>::from_params_ptr(params)))
+        }
+    }
+
     /// Returns the `Id` that represents the type of this key.
     ///
     /// In OpenSSL 3.0+, provider-supplied keys (such as ML-DSA or any key
@@ -274,6 +297,15 @@ impl<T> PKeyRef<T> {
     #[corresponds(EVP_PKEY_size)]
     pub fn size(&self) -> usize {
         unsafe { ffi::EVP_PKEY_size(self.as_ptr()) as usize }
+    }
+
+    /// Returns true if the key matches the string key_type.
+    #[corresponds(EVP_PKEY_is_a)]
+    #[cfg(ossl350)] // Available since ossl300, but currently only used in a function gated behind ossl350
+    fn is_key_type(&self, key_type: &str) -> Result<bool, ErrorStack> {
+        let key_type = CString::new(key_type).unwrap();
+        let res = unsafe { ffi::EVP_PKEY_is_a(self.as_ptr(), key_type.as_ptr()) == 1 };
+        Ok(res)
     }
 }
 
@@ -604,6 +636,19 @@ impl PKey<Private> {
         ctx.keygen()
     }
 
+    #[cfg(ossl350)] // This function exists since ossl300, but we only use it in a function gated to ossl350.
+    fn generate_key_from_name(name: &str) -> Result<PKey<Private>, ErrorStack> {
+        use crate::ossl_param::OsslParamBuilder;
+
+        let mut ctx = PkeyCtx::new_from_name(None, name, None)?;
+        ctx.keygen_init()?;
+        let params = OsslParamBuilder::new()?.to_param()?;
+        unsafe {
+            cvt(ffi::EVP_PKEY_CTX_set_params(ctx.as_ptr(), params.as_ptr()))?;
+        }
+        ctx.generate()
+    }
+
     /// Generates a new private X25519 key.
     ///
     /// To import a private key from raw bytes see [`PKey::private_key_from_raw_bytes`].
@@ -725,6 +770,14 @@ impl PKey<Private> {
             let ptr = cvt_p(ffi::EVP_EC_gen(curve.as_ptr()))?;
             Ok(PKey::from_ptr(ptr))
         }
+    }
+
+    /// Generates a new ML-DSA key with the provided variant.
+    ///
+    /// Requires OpenSSL 3.5.0 or newer.
+    #[cfg(ossl350)]
+    pub fn generate_ml_dsa(variant: pkey_ml_dsa::Variant) -> Result<PKey<Private>, ErrorStack> {
+        Self::generate_key_from_name(variant.as_str())
     }
 
     private_key_from_pem! {
@@ -873,6 +926,15 @@ impl PKey<Private> {
             ))
             .map(|p| PKey::from_ptr(p))
         }
+    }
+
+    /// Creates a private ML-DSA key from a 32-byte seed.
+    #[cfg(ossl350)]
+    pub fn private_key_from_seed(
+        key_type: pkey_ml_dsa::Variant,
+        bytes: &[u8],
+    ) -> Result<PKey<Private>, ErrorStack> {
+        pkey_ml_dsa::new_from_seed(key_type, bytes)
     }
 }
 
