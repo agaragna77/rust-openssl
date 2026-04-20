@@ -49,7 +49,7 @@ use crate::ec::EcKey;
 use crate::error::ErrorStack;
 #[cfg(any(ossl110, boringssl, libressl370, awslc))]
 use crate::pkey_ctx::PkeyCtx;
-#[cfg(ossl350)]
+#[cfg(any(ossl350, boringssl))]
 use crate::pkey_ml_dsa::{self, PKeyMlDsaParams};
 #[cfg(ossl350)]
 use crate::pkey_ml_kem::{self, PKeyMlKemParams};
@@ -201,7 +201,7 @@ impl<T> PKeyRef<T> {
 
     /// Returns the inner `PKeyMlDsaParams`. Returns Ok(None) if either the variant is incorrect or the key is not of type ML-DSA.
     #[corresponds(EVP_PKEY_todata)]
-    #[cfg(ossl350)]
+    #[cfg(all(ossl350, not(boringssl)))]
     pub fn ml_dsa(
         &self,
         variant: pkey_ml_dsa::Variant,
@@ -218,6 +218,15 @@ impl<T> PKeyRef<T> {
             ))?;
             Ok(Some(PKeyMlDsaParams::<T>::from_params_ptr(params)))
         }
+    }
+
+    /// Returns the inner `PKeyMlDsaParams`. Returns Ok(None) if either the variant is incorrect or the key is not of type ML-DSA.
+    #[cfg(boringssl)]
+    pub fn ml_dsa(
+        &self,
+        variant: pkey_ml_dsa::Variant,
+    ) -> Result<Option<PKeyMlDsaParams<T>>, ErrorStack> {
+        pkey_ml_dsa::try_mldsa_params_from_pkey_ref(self, variant)
     }
 
     /// Returns the inner `PKeyMlKemParams`. Returns Ok(None) if either the variant is incorrect or the key is not of type ML-KEM.
@@ -729,9 +738,17 @@ impl PKey<Private> {
     /// Generates a new ML-DSA key with the provided variant.
     ///
     /// Requires OpenSSL 3.5.0 or newer.
-    #[cfg(ossl350)]
+    #[cfg(all(ossl350, not(boringssl)))]
     pub fn generate_ml_dsa(variant: pkey_ml_dsa::Variant) -> Result<PKey<Private>, ErrorStack> {
         Self::generate_key_from_name(variant.as_str())
+    }
+
+    /// Generates a new ML-DSA key with the provided variant.
+    #[cfg(boringssl)]
+    pub fn generate_ml_dsa(variant: pkey_ml_dsa::Variant) -> Result<PKey<Private>, ErrorStack> {
+        let params = pkey_ml_dsa::PKeyMlDsaParams::<Private>::generate(variant)?;
+        let seed = params.private_key_seed()?;
+        pkey_ml_dsa::pkey_from_mldsa_seed(variant, seed)
     }
 
     /// Generates a new ML-KEM key with the provided variant.
@@ -885,7 +902,7 @@ impl PKey<Private> {
     }
 
     /// Creates a private key from seed representation using a string keytype
-    #[cfg(ossl350)]
+    #[cfg(any(ossl350, boringssl))]
     pub fn private_key_from_seed(
         key_type: pkey_ml_dsa::Variant,
         bytes: &[u8],

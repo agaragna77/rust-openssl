@@ -11,12 +11,14 @@ use crate::cvt;
 use crate::error::ErrorStack;
 #[cfg(ossl350)]
 use crate::ossl_param::{OsslParamArray, OsslParamBuilder};
-#[cfg(ossl350)]
+#[cfg(any(ossl350, boringssl))]
 use crate::pkey::{HasPublic, PKey};
+#[cfg(boringssl)]
+use crate::pkey::PKeyRef;
 #[cfg(ossl350)]
 use crate::pkey_ctx::PkeyCtx;
-#[cfg(ossl350)]
-use foreign_types::ForeignType;
+#[cfg(any(ossl350, boringssl))]
+use foreign_types::{ForeignType, ForeignTypeRef};
 #[cfg(ossl350)]
 use std::ffi::CStr;
 use std::marker::PhantomData;
@@ -24,15 +26,8 @@ use std::marker::PhantomData;
 use std::ptr;
 
 // Re-export type markers - available on both backends
-#[cfg(ossl350)]
+#[cfg(any(ossl350, boringssl))]
 pub use crate::pkey::{Private, Public};
-
-#[cfg(boringssl)]
-/// Marker type for private keys
-pub enum Private {}
-#[cfg(boringssl)]
-/// Marker type for public keys
-pub enum Public {}
 
 // OpenSSL-specific constants
 #[cfg(ossl350)]
@@ -73,6 +68,16 @@ impl Variant {
             Variant::MlDsa44 => MLDSA44_STR,
             Variant::MlDsa65 => MLDSA65_STR,
             Variant::MlDsa87 => MLDSA87_STR,
+        }
+    }
+
+    #[cfg(all(boringssl, not(ossl350)))]
+    #[allow(dead_code)]
+    pub(crate) fn as_str(&self) -> &'static str {
+        match self {
+            Variant::MlDsa44 => "ML-DSA-44",
+            Variant::MlDsa65 => "ML-DSA-65",
+            Variant::MlDsa87 => "ML-DSA-87",
         }
     }
 
@@ -541,6 +546,95 @@ impl PKeyMlDsaParams<Private> {
     }
 }
 
+#[cfg(boringssl)]
+pub(crate) fn pkey_from_mldsa_seed(
+    variant: Variant,
+    seed: &[u8],
+) -> Result<PKey<Private>, ErrorStack> {
+    if seed.len() != ffi::mldsa::MLDSA_SEED_BYTES {
+        return Err(ErrorStack::get());
+    }
+    ffi::init();
+    let alg = unsafe {
+        match variant {
+            Variant::MlDsa44 => ffi::EVP_pkey_ml_dsa_44(),
+            Variant::MlDsa65 => ffi::EVP_pkey_ml_dsa_65(),
+            Variant::MlDsa87 => ffi::EVP_pkey_ml_dsa_87(),
+        }
+    };
+    unsafe {
+        let ptr = crate::cvt_p(ffi::EVP_PKEY_from_private_seed(
+            alg,
+            seed.as_ptr(),
+            seed.len(),
+        ))?;
+        Ok(PKey::from_ptr(ptr))
+    }
+}
+
+#[cfg(boringssl)]
+pub(crate) fn try_mldsa_params_from_pkey_ref<T>(
+    pkey: &PKeyRef<T>,
+    variant: Variant,
+) -> Result<Option<PKeyMlDsaParams<T>>, ErrorStack> {
+    let expected = match variant {
+        Variant::MlDsa44 => ffi::EVP_PKEY_ML_DSA_44,
+        Variant::MlDsa65 => ffi::EVP_PKEY_ML_DSA_65,
+        Variant::MlDsa87 => ffi::EVP_PKEY_ML_DSA_87,
+    };
+    unsafe {
+        if ffi::EVP_PKEY_id(pkey.as_ptr()) != expected {
+            return Ok(None);
+        }
+    }
+
+    let mut len = 0usize;
+    unsafe {
+        cvt(ffi::EVP_PKEY_get_raw_public_key(
+            pkey.as_ptr(),
+            ptr::null_mut(),
+            &mut len,
+        ))?;
+    }
+    if len != variant.public_key_bytes() {
+        return Err(ErrorStack::get());
+    }
+    let mut public_key_bytes = vec![0u8; len];
+    unsafe {
+        cvt(ffi::EVP_PKEY_get_raw_public_key(
+            pkey.as_ptr(),
+            public_key_bytes.as_mut_ptr(),
+            &mut len,
+        ))?;
+    }
+
+    let seed = {
+        let mut seed_len = 0usize;
+        unsafe {
+            if ffi::EVP_PKEY_get_private_seed(pkey.as_ptr(), ptr::null_mut(), &mut seed_len) != 1 {
+                None
+            } else if seed_len != ffi::mldsa::MLDSA_SEED_BYTES {
+                return Err(ErrorStack::get());
+            } else {
+                let mut seed = [0u8; ffi::mldsa::MLDSA_SEED_BYTES];
+                cvt(ffi::EVP_PKEY_get_private_seed(
+                    pkey.as_ptr(),
+                    seed.as_mut_ptr(),
+                    &mut seed_len,
+                ))?;
+                Some(seed)
+            }
+        }
+    };
+
+    Ok(Some(PKeyMlDsaParams {
+        variant,
+        public_key_bytes,
+        seed,
+        _m: PhantomData,
+    }))
+}
+
 /// Returns the Private ML-DSA PKey from the provided seed.
 #[cfg(ossl350)]
 pub fn new_from_seed(variant: Variant, seed: &[u8]) -> Result<PKey<Private>, ErrorStack> {
@@ -560,6 +654,11 @@ pub fn new_from_seed(variant: Variant, seed: &[u8]) -> Result<PKey<Private>, Err
         ))?;
         Ok(pkey)
     }
+}
+
+#[cfg(all(boringssl, not(ossl350)))]
+pub fn new_from_seed(variant: Variant, seed: &[u8]) -> Result<PKey<Private>, ErrorStack> {
+    pkey_from_mldsa_seed(variant, seed)
 }
 
 /// Signs a message with ML-DSA using a context string.
@@ -610,6 +709,18 @@ pub fn sign_with_context(
     Ok(signature)
 }
 
+#[cfg(boringssl)]
+pub fn sign_with_context(
+    key: &PKey<Private>,
+    variant: Variant,
+    message: &[u8],
+    context: &[u8],
+) -> Result<Vec<u8>, ErrorStack> {
+    let params = try_mldsa_params_from_pkey_ref(key.as_ref(), variant)?
+        .ok_or_else(|| ErrorStack::get())?;
+    params.sign(message, Some(context))
+}
+
 /// Verifies a message signature with ML-DSA using a context string.
 ///
 /// ML-DSA supports verifying signatures with an optional context string as defined in FIPS 204.
@@ -657,6 +768,20 @@ pub fn verify_with_context(
     let mut ctx = PkeyCtx::new(key)?;
     ctx.verify_message_init_with_params(&mut algo, params.to_param()?)?;
     ctx.verify(message, signature)
+}
+
+#[cfg(boringssl)]
+pub fn verify_with_context(
+    key: &PKey<impl HasPublic>,
+    variant: Variant,
+    message: &[u8],
+    signature: &[u8],
+    context: &[u8],
+) -> Result<bool, ErrorStack> {
+    let p = try_mldsa_params_from_pkey_ref(key.as_ref(), variant)?.ok_or_else(|| ErrorStack::get())?;
+    let pub_key = p.public_key()?;
+    let pub_params = PKeyMlDsaParams::<Public>::from_public_key(variant, pub_key)?;
+    pub_params.verify(message, signature, Some(context))
 }
 
 #[cfg(all(test, ossl350))]
