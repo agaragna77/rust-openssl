@@ -612,6 +612,9 @@ pub(crate) fn try_mldsa_params_from_pkey_ref<T>(
         let mut seed_len = 0usize;
         unsafe {
             if ffi::EVP_PKEY_get_private_seed(pkey.as_ptr(), ptr::null_mut(), &mut seed_len) != 1 {
+                // Public-only keys (e.g. after `public_key_from_raw_bytes_ex`): BoringSSL
+                // reports failure and pushes NOT_A_PRIVATE_KEY onto the error queue.
+                let _ = ErrorStack::get();
                 None
             } else if seed_len != ffi::mldsa::MLDSA_SEED_BYTES {
                 return Err(ErrorStack::get());

@@ -983,6 +983,35 @@ impl PKey<Public> {
             .map(|p| PKey::from_ptr(p))
         }
     }
+
+    /// Creates a public key from its raw byte representation
+    ///
+    /// BoringSSL does not provide `EVP_PKEY_new_raw_public_key_ex`; this uses
+    /// [`EVP_PKEY_from_raw_public_key`] for ML-DSA raw public keys (`ML-DSA-44`, `ML-DSA-65`, `ML-DSA-87`).
+    ///
+    /// [`EVP_PKEY_from_raw_public_key`]: https://commondatastorage.googleapis.com/chromium-boringssl-docs/headers.html#EVP_PKEY_from_raw_public_key
+    #[corresponds(EVP_PKEY_from_raw_public_key)]
+    #[cfg(boringssl)]
+    pub fn public_key_from_raw_bytes_ex(
+        bytes: &[u8],
+        key_type: &str,
+    ) -> Result<PKey<Public>, ErrorStack> {
+        unsafe {
+            ffi::init();
+            let alg = match key_type {
+                "ML-DSA-44" => ffi::EVP_pkey_ml_dsa_44(),
+                "ML-DSA-65" => ffi::EVP_pkey_ml_dsa_65(),
+                "ML-DSA-87" => ffi::EVP_pkey_ml_dsa_87(),
+                _ => return Err(ErrorStack::get()),
+            };
+            cvt_p(ffi::EVP_PKEY_from_raw_public_key(
+                alg,
+                bytes.as_ptr(),
+                bytes.len(),
+            ))
+            .map(|p| PKey::from_ptr(p))
+        }
+    }
 }
 
 use ffi::EVP_PKEY_up_ref;
