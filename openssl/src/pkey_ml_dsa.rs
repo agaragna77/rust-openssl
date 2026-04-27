@@ -556,7 +556,11 @@ impl PKeyMlDsaParams<Private> {
 pub fn new_from_seed(variant: Variant, seed: &[u8]) -> Result<PKey<Private>, ErrorStack> {
     let mut bld = OsslParamBuilder::new()?;
     bld.add_octet_string(OSSL_PKEY_PARAM_SEED, seed)?;
-    let mut ctx = PkeyCtx::new_from_name(None, variant.as_str(), None)?;
+    let mut ctx = PkeyCtx::new_from_name(
+        None,
+        variant.openssl_key_type().as_cstr().to_str().unwrap(),
+        None,
+    )?;
     ctx.fromdata_init()?;
     let params = bld.to_param()?;
     unsafe {
